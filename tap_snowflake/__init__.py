@@ -7,6 +7,7 @@ import itertools
 import re
 import sys
 import logging
+from typing import List
 
 import singer
 import singer.metrics as metrics
@@ -48,7 +49,6 @@ REQUIRED_CONFIG_KEYS = [
     'user',
     'password',
     'warehouse',
-    'tables'
 ]
 
 # Snowflake data types
@@ -169,9 +169,26 @@ def get_table_columns(snowflake_conn, tables):
     return table_columns
 
 
-def discover_catalog(snowflake_conn, config):
+def get_all_tables(snowflake_conn, config) -> List[str]:
+    database = config["dbname"]
+
+    sql = [f"SHOW TABLES IN DATABASE {database}"]
+
+    tables = snowflake_conn.query(sql, max_records=SHOW_COMMAND_MAX_ROWS)
+
+    full_tables = [f"{database}.{table['schema_name']}.{table['name']}" for table in tables]
+
+    return full_tables
+
+
+def discover_catalog(snowflake_conn, config, default_selected=False):
     """Returns a Catalog describing the structure of the database."""
-    tables = config.get('tables').split(',')
+    tables_string = config.get('tables', "")
+    if tables_string:
+        tables = tables_string.split(',')
+    else:
+        tables = get_all_tables(snowflake_conn, config)
+
     sql_columns = get_table_columns(snowflake_conn, tables)
 
     table_info = {}
@@ -208,7 +225,9 @@ def discover_catalog(snowflake_conn, config):
         cols = list(cols)
         (table_catalog, table_schema, table_name) = k
         schema = Schema(type='object',
-                        properties={c.column_name: schema_for_column(c) for c in cols})
+                        properties={c.column_name: schema_for_column(c) for c in cols},
+                        selected=default_selected
+        )
         md = create_column_metadata(cols)
         md_map = metadata.to_map(md)
 
@@ -240,7 +259,7 @@ def discover_catalog(snowflake_conn, config):
 
 
 def do_discover(snowflake_conn, config):
-    discover_catalog(snowflake_conn, config).dump()
+    discover_catalog(snowflake_conn, config, default_selected=True).dump()
 
 
 # pylint: disable=fixme
@@ -447,7 +466,7 @@ def sync_streams(snowflake_conn, catalog, state):
 
         md_map = metadata.to_map(catalog_entry.metadata)
 
-        replication_method = md_map.get((), {}).get('replication-method')
+        replication_method = md_map.get((), {}).get('replication-method', "FULL_TABLE")
 
         database_name = common.get_database_name(catalog_entry)
         schema_name = common.get_schema_name(catalog_entry)
